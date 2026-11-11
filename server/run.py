@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,30 @@ BASE = Path(__file__).parent.resolve()
 DATA = BASE / "bots"
 DATA.mkdir(exist_ok=True)
 PORT = int(os.environ.get("PORT", "5000"))
+PORT_FROM_ENV = "PORT" in os.environ
+
+
+def _port_free(p):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+        return sk.connect_ex(("127.0.0.1", p)) != 0
+
+
+def resolve_port():
+    """Use PORT if it is free. If PORT was set explicitly and is busy, stop with a clear message.
+    If PORT was not set and 5000 is busy, use the next free port and say so."""
+    global PORT
+    if _port_free(PORT):
+        return
+    if PORT_FROM_ENV:
+        raise SystemExit(f"Port {PORT} is already in use by another program. "
+                         f"Stop that program, or set PORT to a different number.")
+    old = PORT
+    for cand in range(old + 1, old + 100):
+        if _port_free(cand):
+            PORT = cand
+            print(f"Port {old} is busy, using port {PORT} instead.", flush=True)
+            return
+    raise SystemExit(f"No free port found near {old}.")
 IMAGE = os.environ.get("BOT_IMAGE", "python:3.11-slim")
 MEM_MB = int(os.environ.get("BOT_MEM_MB", "256"))      # RAM limit per bot
 CPUS = os.environ.get("BOT_CPUS", "0.5")                # CPU limit per bot
@@ -68,6 +93,10 @@ def auth(f):
     def wrapper(*a, **kw):
         got = request.headers.get("Authorization", "")
         token = got[7:] if got.startswith("Bearer ") else ""
+        # Accept either a session token from /api/login, or the admin key itself
+        # as a Bearer token (what older app builds send).
+        if token and hmac.compare_digest(token.encode(), ADMIN_KEY.encode()):
+            return f(*a, **kw)
         exp = SESSIONS.get(_h(token)) if token else None
         if not exp or exp < time.time():
             return jsonify(error="unauthorized"), 401
@@ -595,6 +624,7 @@ def start_named_tunnel():
     as a service on this machine (sudo cloudflared service install <token>)."""
     global TUNNEL_URL
     TUNNEL_URL = PUBLIC_URL
+    print(f"Cloudflare route for {PUBLIC_URL} must point to: http://localhost:{PORT}", flush=True)
     print("\n=== Admin login key (enter it in the app) ===")
     print(ADMIN_KEY)
     print("==============================================\n", flush=True)
@@ -647,15 +677,16 @@ def start_tunnel():
 
 
 if __name__ == "__main__":
+    resolve_port()
     print("Mode:", "Docker (one container per bot)" if USE_DOCKER else
           "NO Docker found - bots run as plain processes (not isolated)", flush=True)
     threading.Thread(target=stats_loop, daemon=True).start()
     if os.environ.get("NO_TUNNEL") == "1":
         tunnel = False
-    elif os.environ.get("QUICK_TUNNEL") == "1":
-        tunnel = start_tunnel()          # old random trycloudflare.com link
-    else:
+    elif os.environ.get("NAMED_TUNNEL") == "1":
         tunnel = start_named_tunnel()    # fixed domain (cloudflared runs as a service)
+    else:
+        tunnel = start_tunnel()          # default: random trycloudflare.com quick tunnel
     # Named/quick tunnels reach us over localhost; only NO_TUNNEL listens on all interfaces.
     host = "0.0.0.0" if os.environ.get("NO_TUNNEL") == "1" else "127.0.0.1"
     if not tunnel:
