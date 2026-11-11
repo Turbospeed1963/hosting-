@@ -568,10 +568,56 @@ def publish_url(url):
         print("Could not publish link:", e, flush=True)
 
 
+CLOUDFLARED_DEB = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+
+
+def install_cloudflared():
+    """Opt-in only (AUTO_INSTALL_CLOUDFLARED=1). Runs the same two commands as the README.
+    sudo may ask for your password in the terminal."""
+    if not (shutil.which("curl") and shutil.which("dpkg") and shutil.which("sudo")):
+        print("Auto-install needs curl, dpkg and sudo (Debian/Ubuntu).", flush=True)
+        return None
+    try:
+        print("Installing cloudflared...", flush=True)
+        subprocess.run(["curl", "-L", CLOUDFLARED_DEB, "-o", "cloudflared.deb"], cwd=BASE, check=True)
+        subprocess.run(["sudo", "dpkg", "-i", "cloudflared.deb"], cwd=BASE, check=True)
+        return shutil.which("cloudflared")
+    except Exception as e:
+        print("cloudflared install failed:", e, flush=True)
+        return None
+
+
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://dexdev.ccwu.cc").rstrip("/")
+
+
+def start_named_tunnel():
+    """Use the fixed Cloudflare named tunnel domain. cloudflared must already be running
+    as a service on this machine (sudo cloudflared service install <token>)."""
+    global TUNNEL_URL
+    TUNNEL_URL = PUBLIC_URL
+    print("\n=== Admin login key (enter it in the app) ===")
+    print(ADMIN_KEY)
+    print("==============================================\n", flush=True)
+
+    def republish():
+        while True:
+            publish_url(TUNNEL_URL)
+            time.sleep(1800)
+
+    threading.Thread(target=republish, daemon=True).start()
+    return True
+
+
 def start_tunnel():
     exe = shutil.which("cloudflared")
+    if not exe and os.environ.get("AUTO_INSTALL_CLOUDFLARED") == "1":
+        exe = install_cloudflared()
     if not exe:
-        print("cloudflared not found. Install it first.")
+        print("cloudflared not found. Install it with:\n"
+              "  curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb\n"
+              "  sudo dpkg -i cloudflared.deb\n"
+              "then start run.py again.\n"
+              "(Or set AUTO_INSTALL_CLOUDFLARED=1 to let run.py do this for you.)", flush=True)
         return False
     p = subprocess.Popen(
         [exe, "tunnel", "--url", f"http://127.0.0.1:{PORT}", "--no-autoupdate"],
@@ -604,8 +650,14 @@ if __name__ == "__main__":
     print("Mode:", "Docker (one container per bot)" if USE_DOCKER else
           "NO Docker found - bots run as plain processes (not isolated)", flush=True)
     threading.Thread(target=stats_loop, daemon=True).start()
-    tunnel = os.environ.get("NO_TUNNEL") != "1" and start_tunnel()
-    host = "127.0.0.1" if tunnel else "0.0.0.0"
+    if os.environ.get("NO_TUNNEL") == "1":
+        tunnel = False
+    elif os.environ.get("QUICK_TUNNEL") == "1":
+        tunnel = start_tunnel()          # old random trycloudflare.com link
+    else:
+        tunnel = start_named_tunnel()    # fixed domain (cloudflared runs as a service)
+    # Named/quick tunnels reach us over localhost; only NO_TUNNEL listens on all interfaces.
+    host = "0.0.0.0" if os.environ.get("NO_TUNNEL") == "1" else "127.0.0.1"
     if not tunnel:
         print(f"\nAdmin login key: {ADMIN_KEY}\nListening on port {PORT}\n")
     app.run(host=host, port=PORT, threaded=True)
