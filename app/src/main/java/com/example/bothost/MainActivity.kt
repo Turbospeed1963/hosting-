@@ -127,8 +127,8 @@ suspend fun discover(key: String): String? = withContext(Dispatchers.IO) {
                 if (o.optString("event") == "message") last = o.getString("message").trim()
             } catch (_: Exception) {}
         }
-        // Only accept a Cloudflare quick-tunnel link, so a forged message can't redirect the key elsewhere
-        last?.takeIf { Regex("""https://[\w-]+\.trycloudflare\.com/?""").matches(it) }
+        // Only accept our fixed named-tunnel domain, so a forged message can't redirect the key elsewhere
+        last?.takeIf { Regex("""https://dexdev\.ccwu\.cc/?""").matches(it) }
     } catch (e: Exception) { null }
 }
 
